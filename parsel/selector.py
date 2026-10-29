@@ -426,16 +426,20 @@ def _compile_xpath(
 def _get_xpath_evaluator(
     query: str, namespaces: dict[str, str], smart_strings: bool
 ) -> etree.XPath:
-    namespaces = {
-        prefix: uri
-        for prefix, uri in namespaces.items()
-        if uri not in _EXSLT_NAMESPACES
-        or not isinstance(query, str)
-        or f"{prefix}:" in query
-    }
-    if _EXSLT_NAMESPACES.intersection(namespaces.values()):
-        return etree.XPath(query, namespaces=namespaces, smart_strings=smart_strings)
-    return _compile_xpath(query, tuple(sorted(namespaces.items())), smart_strings)
+    items = []
+    has_exslt = False
+    for item in namespaces.items():
+        prefix, uri = item
+        if uri in _EXSLT_NAMESPACES:
+            if isinstance(query, str) and f"{prefix}:" not in query:
+                continue
+            has_exslt = True
+        items.append(item)
+    if has_exslt:
+        return etree.XPath(query, namespaces=dict(items), smart_strings=smart_strings)
+    if len(items) > 1:
+        items.sort()
+    return _compile_xpath(query, tuple(items), smart_strings)
 
 
 def _get_root_type(root: Any, *, input_type: str | None) -> str:
@@ -786,27 +790,37 @@ class Selector:
         else:
             root = self._get_root(self._text or "", type_="html")
 
-        nsp = dict(self.namespaces)
+        nsp = self.namespaces
+        if namespaces is not None or type(nsp) is not dict:
+            nsp = dict(nsp)
         if namespaces is not None:
             nsp.update(namespaces)
         try:
             xpathev = _get_xpath_evaluator(query, nsp, self._lxml_smart_strings)
-            result = xpathev(root, **kwargs)
+            result = xpathev(root, **kwargs) if kwargs else xpathev(root)
         except etree.XPathError as exc:
             raise ValueError(f"XPath error: {exc} in {query}")
 
-        if not isinstance(result, list):
-            result = [result]
-
-        result = [
-            self.__class__(
-                root=x,
-                _expr=query,
-                namespaces=self.namespaces,
-                type=_xml_or_html(self.type),
-            )
-            for x in result
-        ]
+        is_list = isinstance(result, list)
+        if not is_list or len(result) == 1:
+            result = [
+                self.__class__(
+                    root=result[0] if is_list else result,
+                    _expr=query,
+                    namespaces=self.namespaces,
+                    type=_xml_or_html(self.type),
+                )
+            ]
+        else:
+            result = [
+                self.__class__(
+                    root=x,
+                    _expr=query,
+                    namespaces=self.namespaces,
+                    type=_xml_or_html(self.type),
+                )
+                for x in result
+            ]
         return typing.cast("SelectorList[Self]", self.selectorlist_cls(result))
 
     def css(self, query: str) -> SelectorList[Self]:
